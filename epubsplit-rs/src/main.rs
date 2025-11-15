@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use log::{debug, info, warn};
 use percent_encoding::percent_decode_str;
 use quick_xml::events::Event;
@@ -15,59 +15,113 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "epubsplit",
-    about = "Split EPUB files into multiple books",
-    long_about = "Giving an epub without line numbers will return a list of line numbers: the \
-                  possible split points in the input file. Calling with line numbers will \
-                  generate an epub with each of the \"lines\" given included."
+    name = "epubtool",
+    about = "EPUB manipulation toolkit - split and merge EPUB files",
+    version
 )]
 struct Cli {
-    /// Input EPUB file to split
-    input: PathBuf,
-
-    /// Line numbers of sections to include in output
-    #[arg(value_name = "LINE")]
-    lines: Vec<usize>,
-
-    /// Output file name
-    #[arg(short, long, default_value = "split.epub")]
-    output: String,
-
-    /// Output directory
-    #[arg(long)]
-    output_dir: Option<PathBuf>,
-
-    /// Create a new epub from each listed section instead of one containing all
-    #[arg(long)]
-    split_by_section: bool,
-
-    /// Metadata title for output epub
-    #[arg(short, long)]
-    title: Option<String>,
-
-    /// Metadata description for output epub
-    #[arg(short, long)]
-    description: Option<String>,
-
-    /// Metadata author(s) for output epub (can be specified multiple times)
-    #[arg(short, long)]
-    author: Vec<String>,
-
-    /// Subject tag(s) for output epub (can be specified multiple times)
-    #[arg(short = 'g', long)]
-    tag: Vec<String>,
-
-    /// Language(s) for output epub (can be specified multiple times)
-    #[arg(short, long, default_value = "en")]
-    language: Vec<String>,
-
-    /// Path to cover image (JPG)
-    #[arg(short, long)]
-    cover: Option<PathBuf>,
-
     /// Enable debug output
-    #[arg(long)]
+    #[arg(long, global = true)]
     debug: bool,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Split an EPUB file into sections
+    Split {
+        /// Input EPUB file to split
+        input: PathBuf,
+
+        /// Line numbers of sections to include in output
+        #[arg(value_name = "LINE")]
+        lines: Vec<usize>,
+
+        /// Output file name
+        #[arg(short, long, default_value = "split.epub")]
+        output: String,
+
+        /// Output directory
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+
+        /// Create a new epub from each listed section instead of one containing all
+        #[arg(long)]
+        split_by_section: bool,
+
+        /// Metadata title for output epub
+        #[arg(short, long)]
+        title: Option<String>,
+
+        /// Metadata description for output epub
+        #[arg(short, long)]
+        description: Option<String>,
+
+        /// Metadata author(s) for output epub (can be specified multiple times)
+        #[arg(short, long)]
+        author: Vec<String>,
+
+        /// Subject tag(s) for output epub (can be specified multiple times)
+        #[arg(short = 'g', long)]
+        tag: Vec<String>,
+
+        /// Language(s) for output epub (can be specified multiple times)
+        #[arg(short, long, default_value = "en")]
+        language: Vec<String>,
+
+        /// Path to cover image (JPG)
+        #[arg(short, long)]
+        cover: Option<PathBuf>,
+    },
+
+    /// Merge multiple EPUB files into one
+    Merge {
+        /// Input EPUB files to merge (at least 2)
+        #[arg(required = true, num_args = 2..)]
+        inputs: Vec<PathBuf>,
+
+        /// Output file name
+        #[arg(short, long, default_value = "merged.epub")]
+        output: String,
+
+        /// Metadata title for merged epub
+        #[arg(short, long)]
+        title: Option<String>,
+
+        /// Metadata description for merged epub
+        #[arg(short, long)]
+        description: Option<String>,
+
+        /// Metadata author(s) for merged epub (can be specified multiple times)
+        #[arg(short, long)]
+        author: Vec<String>,
+
+        /// Subject tag(s) for merged epub (can be specified multiple times)
+        #[arg(short = 'g', long)]
+        tag: Vec<String>,
+
+        /// Language(s) for merged epub (can be specified multiple times)
+        #[arg(short, long, default_value = "en")]
+        language: Vec<String>,
+
+        /// Path to cover image (JPG)
+        #[arg(short, long)]
+        cover: Option<PathBuf>,
+    },
+}
+
+/// Common options for EPUB output
+struct OutputOptions {
+    output: String,
+    output_dir: Option<PathBuf>,
+    title: Option<String>,
+    description: Option<String>,
+    author: Vec<String>,
+    tag: Vec<String>,
+    language: Vec<String>,
+    cover: Option<PathBuf>,
 }
 
 /// Represents a split point in the EPUB
@@ -1167,13 +1221,13 @@ fn list_split_points(lines: &[SplitLine]) -> Result<()> {
     Ok(())
 }
 
-fn split_by_section(
+fn split_by_section_fn(
     epub: &mut SplitEpub,
     lines: &[SplitLine],
     section_indices: &[usize],
-    cli: &Cli,
+    opts: &OutputOptions,
 ) -> Result<()> {
-    let output_filename = ensure_epub_extension(&cli.output);
+    let output_filename = ensure_epub_extension(&opts.output);
 
     let mut splits_list: Vec<(Vec<usize>, String)> = Vec::new();
     let mut current_sections: Vec<usize> = Vec::new();
@@ -1194,7 +1248,7 @@ fn split_by_section(
             // Has TOC entry or first section - start new split
             if !current_sections.is_empty() {
                 let title = current_title.clone().unwrap_or_else(|| {
-                    cli.title
+                    opts.title
                         .clone()
                         .unwrap_or_else(|| format!("{} Split", epub.get_orig_title()))
                 });
@@ -1204,7 +1258,7 @@ fn split_by_section(
             let title = if !toc_list.is_empty() {
                 toc_list[0].clone()
             } else {
-                cli.title
+                opts.title
                     .clone()
                     .unwrap_or_else(|| format!("{} Split", epub.get_orig_title()))
             };
@@ -1217,7 +1271,7 @@ fn split_by_section(
     // Add the last section
     if !current_sections.is_empty() {
         let title = current_title.unwrap_or_else(|| {
-            cli.title
+            opts.title
                 .clone()
                 .unwrap_or_else(|| format!("{} Split", epub.get_orig_title()))
         });
@@ -1227,7 +1281,7 @@ fn split_by_section(
     // Write each split
     for (file_count, (section_list, title)) in splits_list.iter().enumerate() {
         let output_file = format!("{:04}-{}", file_count + 1, output_filename);
-        let output_path = if let Some(ref dir) = cli.output_dir {
+        let output_path = if let Some(ref dir) = opts.output_dir {
             dir.join(&output_file)
         } else {
             PathBuf::from(&output_file)
@@ -1235,10 +1289,10 @@ fn split_by_section(
 
         println!("output file: {}", output_path.display());
 
-        let authors = if cli.author.is_empty() {
+        let authors = if opts.author.is_empty() {
             epub.get_orig_authors().to_vec()
         } else {
-            cli.author.clone()
+            opts.author.clone()
         };
 
         epub.write_split_epub(
@@ -1246,19 +1300,19 @@ fn split_by_section(
             section_list,
             &authors,
             Some(&title),
-            cli.description.as_deref(),
-            &cli.tag,
-            &cli.language,
-            cli.cover.as_ref(),
+            opts.description.as_deref(),
+            &opts.tag,
+            &opts.language,
+            opts.cover.as_ref(),
         )?;
     }
 
     Ok(())
 }
 
-fn extract_sections(epub: &mut SplitEpub, section_indices: &[usize], cli: &Cli) -> Result<()> {
-    let output_filename = ensure_epub_extension(&cli.output);
-    let output_path = if let Some(ref dir) = cli.output_dir {
+fn extract_sections(epub: &mut SplitEpub, section_indices: &[usize], opts: &OutputOptions) -> Result<()> {
+    let output_filename = ensure_epub_extension(&opts.output);
+    let output_path = if let Some(ref dir) = opts.output_dir {
         dir.join(&output_filename)
     } else {
         PathBuf::from(&output_filename)
@@ -1266,13 +1320,13 @@ fn extract_sections(epub: &mut SplitEpub, section_indices: &[usize], cli: &Cli) 
 
     println!("output file: {}", output_path.display());
 
-    let authors = if cli.author.is_empty() {
+    let authors = if opts.author.is_empty() {
         epub.get_orig_authors().to_vec()
     } else {
-        cli.author.clone()
+        opts.author.clone()
     };
 
-    let title = cli
+    let title = opts
         .title
         .clone()
         .unwrap_or_else(|| format!("{} Split", epub.get_orig_title()));
@@ -1282,10 +1336,10 @@ fn extract_sections(epub: &mut SplitEpub, section_indices: &[usize], cli: &Cli) 
         section_indices,
         &authors,
         Some(&title),
-        cli.description.as_deref(),
-        &cli.tag,
-        &cli.language,
-        cli.cover.as_ref(),
+        opts.description.as_deref(),
+        &opts.tag,
+        &opts.language,
+        opts.cover.as_ref(),
     )
 }
 
@@ -1297,35 +1351,539 @@ fn ensure_epub_extension(filename: &str) -> String {
     }
 }
 
+fn merge_epubs(inputs: &[PathBuf], opts: &OutputOptions) -> Result<()> {
+    info!("Merging {} EPUB files", inputs.len());
+
+    if inputs.len() < 2 {
+        bail!("At least 2 EPUB files are required for merging");
+    }
+
+    let output_filename = ensure_epub_extension(&opts.output);
+    let output_path = PathBuf::from(&output_filename);
+    println!("Output file: {}", output_path.display());
+
+    // Collect all content from input EPUBs
+    let mut all_manifest_items: Vec<(String, String, String)> = Vec::new(); // (id, href, media-type)
+    let mut all_spine_items: Vec<String> = Vec::new();
+    let mut all_toc_entries: Vec<(String, String)> = Vec::new(); // (title, href)
+    let mut all_files: HashMap<String, Vec<u8>> = HashMap::new(); // href -> content
+    let mut combined_titles: Vec<String> = Vec::new();
+    let mut combined_authors: HashSet<String> = HashSet::new();
+
+    // Add NCX to manifest
+    all_manifest_items.push((
+        "ncx".to_string(),
+        "toc.ncx".to_string(),
+        "application/x-dtbncx+xml".to_string(),
+    ));
+
+    // Process each input EPUB
+    for (epub_idx, input_path) in inputs.iter().enumerate() {
+        info!("Processing EPUB {}: {}", epub_idx + 1, input_path.display());
+
+        let file = File::open(input_path)
+            .with_context(|| format!("Failed to open EPUB: {}", input_path.display()))?;
+        let reader = BufReader::new(file);
+        let mut archive = ZipArchive::new(reader)
+            .with_context(|| format!("Failed to read EPUB as ZIP: {}", input_path.display()))?;
+
+        // Parse container.xml
+        let container_xml = SplitEpub::read_file_from_archive(&mut archive, "META-INF/container.xml")?;
+        let opf_path = SplitEpub::parse_container_xml(&container_xml)?;
+        let content_relpath = SplitEpub::get_path_part(&opf_path);
+
+        // Parse OPF
+        let opf_content = SplitEpub::read_file_from_archive(&mut archive, &opf_path)?;
+        let (manifest_items, toc_path) = SplitEpub::parse_manifest(&opf_content, &content_relpath)?;
+        let spine_refs = SplitEpub::parse_spine(&opf_content)?;
+        let (orig_title, orig_authors) = SplitEpub::parse_metadata(&opf_content)?;
+
+        combined_titles.push(orig_title.clone());
+        for author in orig_authors {
+            combined_authors.insert(author);
+        }
+
+        // Parse TOC if available
+        let toc_map = if let Some(toc_path) = &toc_path {
+            let toc_relpath = SplitEpub::get_path_part(toc_path);
+            let toc_content = SplitEpub::read_file_from_archive(&mut archive, toc_path)?;
+            SplitEpub::parse_toc(&toc_content, &toc_relpath)?
+        } else {
+            HashMap::new()
+        };
+
+        // Prefix to make file names unique per source EPUB
+        let prefix = format!("epub{}_", epub_idx);
+        let mut href_map: HashMap<String, String> = HashMap::new(); // old href -> new href
+
+        // Collect all resources from this EPUB (content + linked files)
+        let mut linked_files: HashSet<String> = HashSet::new();
+        let mut content_hrefs: Vec<String> = Vec::new();
+
+        // Process spine items (main content)
+        for idref in &spine_refs {
+            if let Some(item) = manifest_items.get(idref) {
+                let old_href = &item.href;
+                let new_href = format!("{}{}", prefix, old_href.replace('/', "_"));
+                href_map.insert(old_href.clone(), new_href.clone());
+                content_hrefs.push(old_href.clone());
+
+                // Read and rewrite content
+                if let Ok(content) = SplitEpub::read_file_from_archive(&mut archive, old_href) {
+                    // Scan for linked resources
+                    let base_path = SplitEpub::get_path_part(old_href);
+                    let img_re = Regex::new(r#"(?:src|xlink:href)=["']([^"']+)["']"#)
+                        .context("Failed to compile image regex")?;
+                    for cap in img_re.captures_iter(&content) {
+                        if let Some(src) = cap.get(1) {
+                            let src_str = src.as_str();
+                            if !src_str.starts_with("http://") && !src_str.starts_with("https://") {
+                                let full_path =
+                                    SplitEpub::normalize_path(&format!("{}{}", base_path, src_str));
+                                linked_files.insert(full_path);
+                            }
+                        }
+                    }
+
+                    // Scan for CSS links
+                    let css_link_re = Regex::new(r#"<link[^>]+href=["']([^"']+\.css)["'][^>]*>"#)
+                        .context("Failed to compile CSS link regex")?;
+                    for cap in css_link_re.captures_iter(&content) {
+                        if let Some(href) = cap.get(1) {
+                            let full_path =
+                                SplitEpub::normalize_path(&format!("{}{}", base_path, href.as_str()));
+                            linked_files.insert(full_path);
+                        }
+                    }
+
+                    all_files.insert(new_href, content.into_bytes());
+                }
+            }
+        }
+
+        // Process linked files (CSS, images, fonts)
+        for old_href in &linked_files {
+            if !href_map.contains_key(old_href) {
+                let new_href = format!("{}{}", prefix, old_href.replace('/', "_"));
+                href_map.insert(old_href.clone(), new_href.clone());
+
+                // Read binary file
+                if let Ok(mut file) = archive.by_name(old_href) {
+                    let mut data = Vec::new();
+                    if file.read_to_end(&mut data).is_ok() {
+                        all_files.insert(new_href, data);
+                    }
+                }
+            }
+        }
+
+        // Rewrite hrefs in content files
+        for old_href in &content_hrefs {
+            let new_href = href_map.get(old_href).cloned().unwrap_or_default();
+            if let Some(content_bytes) = all_files.get_mut(&new_href) {
+                let mut content = String::from_utf8_lossy(content_bytes).to_string();
+
+                // Rewrite all internal references
+                for (old_ref, new_ref) in &href_map {
+                    // Handle relative paths - strip common prefix
+                    let old_basename = old_ref.split('/').last().unwrap_or(old_ref);
+                    let patterns = vec![
+                        (format!(r#"href="{}""#, old_basename), format!(r#"href="{}""#, new_ref)),
+                        (format!(r#"href='{}'"#, old_basename), format!(r#"href='{}'"#, new_ref)),
+                        (format!(r#"src="{}""#, old_basename), format!(r#"src="{}""#, new_ref)),
+                        (format!(r#"src='{}'"#, old_basename), format!(r#"src='{}'"#, new_ref)),
+                    ];
+
+                    for (old_pattern, new_pattern) in patterns {
+                        content = content.replace(&old_pattern, &new_pattern);
+                    }
+                }
+
+                *content_bytes = content.into_bytes();
+            }
+        }
+
+        // Add manifest and spine items
+        let mut content_count = all_spine_items.len();
+        for idref in &spine_refs {
+            if let Some(item) = manifest_items.get(idref) {
+                let new_href = href_map.get(&item.href).cloned().unwrap_or_default();
+                let id = format!("content{}", content_count);
+                content_count += 1;
+                all_manifest_items.push((id.clone(), new_href, item.media_type.clone()));
+                all_spine_items.push(id);
+            }
+        }
+
+        // Add linked files to manifest
+        for old_href in linked_files {
+            if let Some(new_href) = href_map.get(&old_href) {
+                let id = format!("resource{}", all_manifest_items.len());
+                let media_type = guess_media_type_static(new_href);
+                all_manifest_items.push((id, new_href.clone(), media_type));
+            }
+        }
+
+        // Build TOC entries for this EPUB
+        // Add a section marker for this book
+        all_toc_entries.push((orig_title.clone(), String::new()));
+
+        for idref in &spine_refs {
+            if let Some(item) = manifest_items.get(idref) {
+                let new_href = href_map.get(&item.href).cloned().unwrap_or_default();
+
+                if let Some(toc_entries) = toc_map.get(&item.href) {
+                    for entry in toc_entries {
+                        let href = if let Some(anchor) = &entry.anchor {
+                            format!("{}#{}", new_href, anchor)
+                        } else {
+                            new_href.clone()
+                        };
+                        all_toc_entries.push((entry.text.clone(), href));
+                    }
+                }
+            }
+        }
+    }
+
+    // Create output EPUB
+    let output_file = File::create(&output_path)
+        .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
+    let mut zip = ZipWriter::new(output_file);
+
+    // Write mimetype first (must be uncompressed and first)
+    let stored_options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    zip.start_file("mimetype", stored_options)
+        .context("Failed to write mimetype")?;
+    zip.write_all(b"application/epub+zip")
+        .context("Failed to write mimetype content")?;
+
+    let deflate_options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    // Write META-INF/container.xml
+    let container_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+   <rootfiles>
+      <rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>
+   </rootfiles>
+</container>
+"#;
+    zip.start_file("META-INF/container.xml", deflate_options)
+        .context("Failed to create container.xml")?;
+    zip.write_all(container_xml.as_bytes())
+        .context("Failed to write container.xml")?;
+
+    // Generate unique ID
+    let unique_id = format!(
+        "epubmerge-uid-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+
+    // Determine title
+    let final_title = opts.title.clone().unwrap_or_else(|| {
+        if combined_titles.len() <= 3 {
+            combined_titles.join(" + ")
+        } else {
+            format!("{} + {} more", combined_titles[0], combined_titles.len() - 1)
+        }
+    });
+
+    // Determine authors
+    let final_authors = if opts.author.is_empty() {
+        combined_authors.into_iter().collect::<Vec<_>>()
+    } else {
+        opts.author.clone()
+    };
+
+    // Determine description
+    let final_description = opts.description.clone().unwrap_or_else(|| {
+        format!("Merged from: {}.", combined_titles.join(", "))
+    });
+
+    // Write all content files
+    for (href, content) in &all_files {
+        zip.start_file(href.as_str(), deflate_options)
+            .with_context(|| format!("Failed to add file: {}", href))?;
+        zip.write_all(content)
+            .with_context(|| format!("Failed to write file: {}", href))?;
+    }
+
+    // Generate and write content.opf
+    let content_opf = generate_merged_opf(
+        &unique_id,
+        &final_title,
+        &final_authors,
+        &final_description,
+        &opts.tag,
+        &opts.language,
+        &all_manifest_items,
+        &all_spine_items,
+    );
+    zip.start_file("content.opf", deflate_options)
+        .context("Failed to create content.opf")?;
+    zip.write_all(content_opf.as_bytes())
+        .context("Failed to write content.opf")?;
+
+    // Generate and write toc.ncx
+    let toc_ncx = generate_merged_toc(&unique_id, &final_title, &all_toc_entries);
+    zip.start_file("toc.ncx", deflate_options)
+        .context("Failed to create toc.ncx")?;
+    zip.write_all(toc_ncx.as_bytes())
+        .context("Failed to write toc.ncx")?;
+
+    zip.finish().context("Failed to finalize EPUB file")?;
+
+    info!("Successfully merged {} EPUBs into {}", inputs.len(), output_path.display());
+    println!("Successfully created merged EPUB: {}", output_path.display());
+
+    Ok(())
+}
+
+fn guess_media_type_static(href: &str) -> String {
+    let lower = href.to_lowercase();
+    if lower.ends_with(".css") {
+        "text/css".to_string()
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg".to_string()
+    } else if lower.ends_with(".png") {
+        "image/png".to_string()
+    } else if lower.ends_with(".gif") {
+        "image/gif".to_string()
+    } else if lower.ends_with(".svg") {
+        "image/svg+xml".to_string()
+    } else if lower.ends_with(".ttf") {
+        "application/x-font-ttf".to_string()
+    } else if lower.ends_with(".otf") {
+        "application/vnd.ms-opentype".to_string()
+    } else if lower.ends_with(".woff") {
+        "application/font-woff".to_string()
+    } else if lower.ends_with(".woff2") {
+        "font/woff2".to_string()
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
+fn generate_merged_opf(
+    unique_id: &str,
+    title: &str,
+    authors: &[String],
+    description: &str,
+    tags: &[String],
+    languages: &[String],
+    manifest_items: &[(String, String, String)],
+    spine_items: &[String],
+) -> String {
+    let mut opf = String::new();
+
+    opf.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
+<package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="epubmerge-id">
+   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+"#);
+
+    opf.push_str(&format!(
+        "      <dc:identifier id=\"epubmerge-id\">{}</dc:identifier>\n",
+        SplitEpub::escape_xml(unique_id)
+    ));
+
+    opf.push_str(&format!(
+        "      <dc:title>{}</dc:title>\n",
+        SplitEpub::escape_xml(title)
+    ));
+
+    for author in authors {
+        opf.push_str(&format!(
+            "      <dc:creator opf:role=\"aut\">{}</dc:creator>\n",
+            SplitEpub::escape_xml(author)
+        ));
+    }
+
+    opf.push_str("      <dc:contributor opf:role=\"bkp\">epubsplit-rs</dc:contributor>\n");
+
+    for lang in languages {
+        opf.push_str(&format!(
+            "      <dc:language>{}</dc:language>\n",
+            SplitEpub::escape_xml(lang)
+        ));
+    }
+
+    opf.push_str(&format!(
+        "      <dc:description>{}</dc:description>\n",
+        SplitEpub::escape_xml(description)
+    ));
+
+    for tag in tags {
+        opf.push_str(&format!(
+            "      <dc:subject>{}</dc:subject>\n",
+            SplitEpub::escape_xml(tag)
+        ));
+    }
+
+    opf.push_str("   </metadata>\n");
+
+    opf.push_str("   <manifest>\n");
+    for (id, href, media_type) in manifest_items {
+        opf.push_str(&format!(
+            "      <item id=\"{}\" href=\"{}\" media-type=\"{}\"/>\n",
+            SplitEpub::escape_xml(id),
+            SplitEpub::escape_xml(href),
+            SplitEpub::escape_xml(media_type)
+        ));
+    }
+    opf.push_str("   </manifest>\n");
+
+    opf.push_str("   <spine toc=\"ncx\">\n");
+    for idref in spine_items {
+        opf.push_str(&format!(
+            "      <itemref idref=\"{}\" linear=\"yes\"/>\n",
+            SplitEpub::escape_xml(idref)
+        ));
+    }
+    opf.push_str("   </spine>\n");
+
+    opf.push_str("</package>\n");
+
+    opf
+}
+
+fn generate_merged_toc(unique_id: &str, title: &str, toc_entries: &[(String, String)]) -> String {
+    let mut ncx = String::new();
+
+    ncx.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
+<ncx version="2005-1" xmlns="http://www.daisy.org/z3986/2005/ncx/">
+   <head>
+"#);
+
+    ncx.push_str(&format!(
+        "      <meta name=\"dtb:uid\" content=\"{}\"/>\n",
+        SplitEpub::escape_xml(unique_id)
+    ));
+    ncx.push_str("      <meta name=\"dtb:depth\" content=\"1\"/>\n");
+    ncx.push_str("      <meta name=\"dtb:totalPageCount\" content=\"0\"/>\n");
+    ncx.push_str("      <meta name=\"dtb:maxPageNumber\" content=\"0\"/>\n");
+    ncx.push_str("   </head>\n");
+
+    ncx.push_str("   <docTitle>\n");
+    ncx.push_str(&format!(
+        "      <text>{}</text>\n",
+        SplitEpub::escape_xml(title)
+    ));
+    ncx.push_str("   </docTitle>\n");
+
+    ncx.push_str("   <navMap>\n");
+
+    let mut play_order = 0;
+    for (text, src) in toc_entries {
+        if src.is_empty() {
+            // Section marker (book title) - skip in TOC for now
+            continue;
+        }
+        play_order += 1;
+        ncx.push_str(&format!(
+            "      <navPoint id=\"navpoint-{}\" playOrder=\"{}\">\n",
+            play_order, play_order
+        ));
+        ncx.push_str("         <navLabel>\n");
+        ncx.push_str(&format!(
+            "            <text>{}</text>\n",
+            SplitEpub::escape_xml(text)
+        ));
+        ncx.push_str("         </navLabel>\n");
+        ncx.push_str(&format!(
+            "         <content src=\"{}\"/>\n",
+            SplitEpub::escape_xml(src)
+        ));
+        ncx.push_str("      </navPoint>\n");
+    }
+
+    ncx.push_str("   </navMap>\n");
+    ncx.push_str("</ncx>\n");
+
+    ncx
+}
+
 fn run(cli: Cli) -> Result<()> {
     debug!("CLI arguments: {:?}", cli);
 
-    let output_filename = ensure_epub_extension(&cli.output);
-    info!("Output filename: {}", output_filename);
+    match cli.command {
+        Commands::Split {
+            input,
+            lines,
+            output,
+            output_dir,
+            split_by_section,
+            title,
+            description,
+            author,
+            tag,
+            language,
+            cover,
+        } => {
+            let output_filename = ensure_epub_extension(&output);
+            info!("Output filename: {}", output_filename);
 
-    // Load the EPUB file
-    let mut epub = SplitEpub::new(cli.input.clone())
-        .with_context(|| format!("Failed to load EPUB: {}", cli.input.display()))?;
+            // Load the EPUB file
+            let mut epub = SplitEpub::new(input.clone())
+                .with_context(|| format!("Failed to load EPUB: {}", input.display()))?;
 
-    // Get available split points
-    let lines = epub
-        .get_split_lines()
-        .context("Failed to extract split points from EPUB")?;
+            // Get available split points
+            let split_lines = epub
+                .get_split_lines()
+                .context("Failed to extract split points from EPUB")?;
 
-    if cli.split_by_section {
-        // Mode: Split into separate files per section
-        let indices = if cli.lines.is_empty() {
-            (0..lines.len()).collect::<Vec<_>>()
-        } else {
-            cli.lines.clone()
-        };
-        split_by_section(&mut epub, &lines, &indices, &cli)?;
-    } else if cli.lines.is_empty() {
-        // Mode: List available split points
-        list_split_points(&lines)?;
-    } else {
-        // Mode: Extract specific sections into one file
-        extract_sections(&mut epub, &cli.lines, &cli)?;
+            let opts = OutputOptions {
+                output,
+                output_dir,
+                title,
+                description,
+                author,
+                tag,
+                language,
+                cover,
+            };
+
+            if split_by_section {
+                // Mode: Split into separate files per section
+                let indices = if lines.is_empty() {
+                    (0..split_lines.len()).collect::<Vec<_>>()
+                } else {
+                    lines
+                };
+                split_by_section_fn(&mut epub, &split_lines, &indices, &opts)?;
+            } else if lines.is_empty() {
+                // Mode: List available split points
+                list_split_points(&split_lines)?;
+            } else {
+                // Mode: Extract specific sections into one file
+                extract_sections(&mut epub, &lines, &opts)?;
+            }
+        }
+        Commands::Merge {
+            inputs,
+            output,
+            title,
+            description,
+            author,
+            tag,
+            language,
+            cover,
+        } => {
+            let opts = OutputOptions {
+                output,
+                output_dir: None,
+                title,
+                description,
+                author,
+                tag,
+                language,
+                cover,
+            };
+
+            merge_epubs(&inputs, &opts)?;
+        }
     }
 
     Ok(())
